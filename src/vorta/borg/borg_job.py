@@ -275,8 +275,7 @@ class BorgJob(JobInterface, BackupProfileMixin):
                 out = p.stdout.read()
                 if out:
                     stdout.append(out)
-                else: # EOF on stdout so close it and remove
-                    p.stdout.close()
+                else:
                     fds.remove(p.stdout)
 
             if p.stderr in readable:
@@ -322,8 +321,7 @@ class BorgJob(JobInterface, BackupProfileMixin):
                             if msg:  # Log only if there is something to log.
                                 self.app.backup_log_event.emit(f'[{self.params["profile_name"]}] {msg}', {})
                                 logger.warning(msg)
-                else: # EOF on stderr so close it and remove
-                    p.stderr.close()
+                else:
                     fds.remove(p.stderr)
 
         # stdout and stderr both returned an EOF so now we just wait for the process to exit
@@ -342,7 +340,7 @@ class BorgJob(JobInterface, BackupProfileMixin):
         except ValueError:
             result['data'] = stdout
 
-        log_entry.returncode = p.returncode
+        log_entry.returncode = returncode
         log_entry.repo_url = self.params.get('repo_url', None)
         log_entry.end_time = dt.now()
         with db_lock:

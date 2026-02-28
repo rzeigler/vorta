@@ -1,4 +1,5 @@
 from pathlib import PurePath
+import time
 
 import pytest
 from PyQt6.QtCore import QDateTime, QItemSelectionModel, Qt
@@ -19,11 +20,14 @@ from vorta.views.diff_result import (
 )
 from vorta.views.partials.treemodel import FileTreeModel
 
+def wait_successful():
+    time.sleep(0.1)
+    return 0
 
 def setup_diff_result_window(qtbot, mocker, tab, borg_json_output, json_mock_file="diff_archives"):
     """Sets up the diff result window."""
     stdout, stderr = borg_json_output(json_mock_file)
-    popen_result = mocker.MagicMock(stdout=stdout, stderr=stderr, returncode=0)
+    popen_result = mocker.MagicMock(stdout=stdout, stderr=stderr, wait=wait_successful)
     mocker.patch.object(vorta.borg.borg_job, 'Popen', return_value=popen_result)
 
     compat = vorta.utils.borg_compat
