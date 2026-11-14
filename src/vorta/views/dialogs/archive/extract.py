@@ -4,9 +4,9 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePath
-from typing import Optional, Union
+from typing import List, Optional, Union
 
-from PyQt6 import uic
+from PyQt6 import QtCore, uic
 from PyQt6.QtCore import (
     QDateTime,
     QLocale,
@@ -32,6 +32,7 @@ from vorta.views.partials.treemodel import (
     FileSystemItem,
     FileTreeModel,
     FileTreeSortProxyModel,
+    Path,
     path_to_str,
     relative_path,
 )
@@ -90,6 +91,9 @@ class ExtractDialog(ExtractDialogBase, ExtractDialogUI):
         view.setModel(self.sortproxy)
         self.sortproxy.sorted.connect(self.slot_sorted)
 
+        # connect the custom checkstate changed signal to trigger a refresh
+        self.model.checkStateChanged.connect(self.refresh_view)
+
         view.setSortingEnabled(True)
 
         # header
@@ -128,6 +132,12 @@ class ExtractDialog(ExtractDialogBase, ExtractDialogUI):
         # Connect to palette change
         self._palette_connection = QApplication.instance().paletteChanged.connect(lambda p: self.set_icons())
         self.destroyed.connect(self._on_destroyed)
+
+    def refresh_view(self):
+        # Checkstate has changed. The model won't emit dataChanged for all items because
+        # it is too expensive.
+        # Command the treeview to repaint itself instead
+        self.treeView.viewport().update()
 
     def retranslateUi(self, dialog):
         """Retranslate strings in ui."""
@@ -342,15 +352,30 @@ class FileData:
     last_modified: QDateTime
     source_path: Optional[str] = None  # only relevant for links
 
-    checkstate: Qt.CheckState = Qt.CheckState.Unchecked  # whether to extract the file (0, 1 or 2)
-    checked_children: int = 0  # number of children checked
-
 
 ExtractFileItem = FileSystemItem[FileData]
 
 
 class ExtractTree(FileTreeModel[FileData]):
     """The file tree model for diff results."""
+
+    # A custom dataChanged signal
+    # Previously, checking an item with a deep subtree was excessively expensive due to the
+    # need to recursively walk the subtree, compute the checkstate, and fire hundres of thousands
+    # to millions of dataChanged events.
+    # Instead of doing a subtree walk, we store only the explicit places that we have selected
+    # or deselected and use that to compute the checkstate. There still needs to be a way
+    # to signal the view to refresh that doesn't require all those dataChanged emissions
+    # The expected use case it to connect this to the TreeView's viewport::update method
+    # The view will then query only the visible items checkstate.
+    checkStateChanged = QtCore.pyqtSignal()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Its too expensive to recompute the entire tree check state. Instead, lets store explicit
+        # selections and deselections and then use these to determine
+        self.explicit_selects: List[Path] = []
+        self.explicit_deselects: List[Path] = []
 
     def _make_filesystemitem(self, path, data):
         return super()._make_filesystemitem(path, data)
@@ -591,7 +616,28 @@ class ExtractTree(FileTreeModel[FileData]):
             return tooltip
 
         if role == Qt.ItemDataRole.CheckStateRole and column == 0:
-            return item.data.checkstate
+            return self._compute_checkstate(index)
+
+    def _compute_checkstate(self, index: QModelIndex) -> Qt.CheckState:
+        item: ExtractFileItem = index.internalPointer()
+        path = item.path
+
+        # The closest mark, including one on this item, determines its base state.
+        checked = False
+        for length in range(len(path), 0, -1):
+            prefix = path[:length]
+            if prefix in self.explicit_selects:
+                checked = True
+                break
+            if prefix in self.explicit_deselects:
+                break
+
+        # A contrary choice below this item makes it partially checked even
+        # when this item has an explicit mark of its own.
+        contrary = self.explicit_deselects if checked else self.explicit_selects
+        if any(len(mark) > len(path) and mark[: len(path)] == path for mark in contrary):
+            return Qt.CheckState.PartiallyChecked
+        return Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
 
     def setData(
         self,
@@ -616,100 +662,46 @@ class ExtractTree(FileTreeModel[FileData]):
         if isinstance(role, int):
             role = Qt.ItemDataRole(role)
 
+        if not index.isValid() or value not in (Qt.CheckState.Checked, Qt.CheckState.Unchecked):
+            return False
+
         item: ExtractFileItem = index.internalPointer()
+        path = item.path
+        old_selects = self.explicit_selects
+        old_deselects = self.explicit_deselects
 
-        if value == item.data.checkstate:
-            return True
+        # A folder click replaces every descendant choice in that subtree.
+        self.explicit_selects = [mark for mark in old_selects if mark[: len(path)] != path]
+        self.explicit_deselects = [mark for mark in old_deselects if mark[: len(path)] != path]
 
-        super_index = index.parent()
-        if super_index == QModelIndex():
-            super_item = self.root
-        else:
-            super_item: ExtractFileItem = super_index.internalPointer()
+        # Only store a mark when the requested state differs from inheritance.
+        inherited_checked = False
+        for length in range(len(path) - 1, 0, -1):
+            prefix = path[:length]
+            if prefix in self.explicit_selects:
+                inherited_checked = True
+                break
+            if prefix in self.explicit_deselects:
+                break
 
-        parent = item._parent
-        while parent != super_item:
-            if value == Qt.CheckState.Unchecked:
-                # must have been one of the others previously
-                parent.data.checked_children -= 1
-            elif item.data.checkstate == Qt.CheckState.Unchecked:  # old value
-                # change from partially checked to checked
-                # or the other way around does not change this count
-                parent.data.checked_children += 1
-
-            if parent.data.checked_children:
-                parent.data.checkstate = Qt.CheckState.PartiallyChecked
+        if (value == Qt.CheckState.Checked) != inherited_checked:
+            if value == Qt.CheckState.Checked:
+                self.explicit_selects.append(path)
             else:
-                parent.data.checkstate = Qt.CheckState.Unchecked
+                self.explicit_deselects.append(path)
 
-            parent = parent._parent
+        if self.explicit_selects == old_selects and self.explicit_deselects == old_deselects:
+            return False
 
-        if super_index != QModelIndex():
-            if value == Qt.CheckState.Unchecked:
-                # must have been one of the others previously
-                super_item.data.checked_children -= 1
-            elif item.data.checkstate == Qt.CheckState.Unchecked:
-                # change from partially checked to checked
-                # or the other way around does not change this count
-                super_item.data.checked_children += 1
-
-            # update parent's state and possibly the parent's parent's state
-            if super_item.data.checked_children:
-                self.setData(super_index, Qt.CheckState.PartiallyChecked, role)
-            else:
-                self.setData(super_index, Qt.CheckState.Unchecked, role)
-
-        # update state of the children without changing their parents' states
-        if value != Qt.CheckState.PartiallyChecked:
-            self.set_checkstate_recursively(index, value)
-
-        # update this item's state
-        item.data.checkstate = value
         self.dataChanged.emit(index, index, (role,))
+        # Ancestor changed emission
+        parent = index.parent()
+        while parent.isValid():
+            self.dataChanged.emit(parent, parent, (role,))
+            parent = parent.parent()
+        self.checkStateChanged.emit()
 
         return True
-
-    def set_checkstate_recursively(self, index: QModelIndex, value: Qt.CheckState):
-        """
-        Set the checkstate of the children of an index recursively.
-
-        Parameters
-        ----------
-        index : QModelIndex
-            The parent index to start with.
-        value : Qt.CheckState
-            The state to set.
-        """
-
-        number_children = self.rowCount(index)
-        if not number_children:
-            return
-
-        index.internalPointer().data.checked_children = 0 if value == Qt.CheckState.Unchecked else number_children
-
-        item = index.internalPointer()
-        for i in range(number_children):
-            child = self.index(i, 0, index)
-            child_item: ExtractFileItem = child.internalPointer()
-            child_item.data.checkstate = value
-
-            # set state of hidden items
-            parent = child_item._parent
-            while parent != item:
-                # hidden parent must have 1 child
-                parent.data.checked_children = 0 if value == Qt.CheckState.Unchecked else self.rowCount(child)
-                parent.data.checkstate = value
-
-                parent = parent._parent
-
-            # set state of this child's children
-            self.set_checkstate_recursively(child, value)
-
-        self.dataChanged.emit(
-            self.index(0, 0, index),
-            self.index(0, number_children - 1, index),
-            (Qt.ItemDataRole.CheckStateRole,),
-        )
 
     def flags(self, index: QModelIndex):
         """

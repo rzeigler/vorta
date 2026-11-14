@@ -84,6 +84,48 @@ def deselect(model, index):
     model.setData(index, Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
 
 
+def test_lazy_selection_overlapping_paths():
+    model = ExtractTree()
+    parse_json_lines([updated(path, {}) for path in ("a", "a/b", "a/b/c", "a/b/d", "a/e")], model)
+
+    def state(*path):
+        return model.data(model.indexPath(path), Qt.ItemDataRole.CheckStateRole)
+
+    select(model, model.indexPath(("a",)))
+    deselect(model, model.indexPath(("a", "b")))
+    select(model, model.indexPath(("a", "b", "c")))
+    assert state("a") == Qt.CheckState.PartiallyChecked
+    assert state("a", "b") == Qt.CheckState.PartiallyChecked
+    assert state("a", "b", "c") == Qt.CheckState.Checked
+    assert state("a", "b", "d") == Qt.CheckState.Unchecked
+    assert state("a", "e") == Qt.CheckState.Checked
+
+    select(model, model.indexPath(("a", "b")))
+    assert state("a") == Qt.CheckState.Checked
+    assert state("a", "b") == Qt.CheckState.Checked
+    assert state("a", "b", "c") == Qt.CheckState.Checked
+    assert state("a", "b", "d") == Qt.CheckState.Checked
+    assert model.explicit_selects == [("a",)]
+    assert model.explicit_deselects == []
+
+    deselect(model, model.indexPath(("a",)))
+    assert state("a") == Qt.CheckState.Unchecked
+    assert state("a", "b", "c") == Qt.CheckState.Unchecked
+    assert model.explicit_selects == []
+    assert model.explicit_deselects == []
+
+    select(model, model.indexPath(("a", "b", "c")))
+    assert state("a") == Qt.CheckState.PartiallyChecked
+    assert state("a", "b") == Qt.CheckState.PartiallyChecked
+    assert state("a", "b", "c") == Qt.CheckState.Checked
+    assert state("a", "b", "d") == Qt.CheckState.Unchecked
+
+    select(model, model.indexPath(("a",)))
+    assert state("a") == Qt.CheckState.Checked
+    assert state("a", "b", "d") == Qt.CheckState.Checked
+    assert model.explicit_selects == [("a",)]
+
+
 def test_selection():
     """Test selecting items for extraction."""
     lines = [
@@ -102,96 +144,61 @@ def test_selection():
     model = ExtractTree()
     parse_json_lines(lines, model)
 
-    # Test select
-    ic = model.index(1, 0, QModelIndex())
-    c: FileSystemItem[FileData] = ic.internalPointer()
+    def state(*path):
+        return model.data(model.indexPath(path), Qt.ItemDataRole.CheckStateRole)
 
+    ic = model.indexPath(("c",))
     select(model, ic)
-    assert c.data.checkstate == Qt.CheckState(2)
-    assert c.data.checked_children == 0
-
-    # Test deselect
+    assert state("c") == Qt.CheckState.Checked
     deselect(model, ic)
-    assert c.data.checkstate == Qt.CheckState(0)
-    assert c.data.checked_children == 0
+    assert state("c") == Qt.CheckState.Unchecked
 
-    # Test select parent as well as children
-    ia = model.index(0, 0, QModelIndex())
-    a: FileSystemItem[FileData] = ia.internalPointer()
-    aa = model.getItem(("a", "a"))
-    aab = model.getItem(("a", "a", "b"))
-    ab = model.getItem(("a", "b"))
-    abc = model.getItem(("a", "b", "c"))
+    ia = model.indexPath(("a",))
+    iab = model.indexPath(("a", "b"))
+    iaa = model.indexPath(("a", "a"))
+    iaac = model.indexPath(("a", "a", "c"))
 
     select(model, ia)
-    assert a.data.checkstate
-    assert a.data.checked_children == 2
-    assert a.data.checked_children == 2
-    assert aab.data.checkstate
-    assert ab.data.checkstate
-    assert aa.data.checkstate
-    assert aa.data.checked_children == 5
+    for path in (("a",), ("a", "a"), ("a", "a", "b"), ("a", "b"), ("a", "b", "c")):
+        assert state(*path) == Qt.CheckState.Checked
 
-    # Test deselect item as well as children with selected parent
-    iab = model.indexPath(("a", "b"))
     deselect(model, iab)
+    assert state("a") == Qt.CheckState.PartiallyChecked
+    assert state("a", "a") == Qt.CheckState.Checked
+    assert state("a", "b") == Qt.CheckState.Unchecked
+    assert state("a", "b", "c") == Qt.CheckState.Unchecked
 
-    assert a.data.checkstate == Qt.CheckState(1)
-    assert aa.data.checkstate == Qt.CheckState(2)
-    assert ab.data.checkstate == Qt.CheckState(0)
-    assert abc.data.checkstate == Qt.CheckState(0)
-    assert a.data.checked_children == 1
-    assert ab.data.checked_children == 0
-
-    # Test deselect item and children
     deselect(model, ia)
-
-    assert a.data.checkstate == Qt.CheckState(0)
-    assert aa.data.checkstate == Qt.CheckState(0)
-    assert ab.data.checkstate == Qt.CheckState(0)
-    assert a.data.checked_children == 0
-    assert aa.data.checked_children == 0
-
-    # Test select child with partially selected parent
-    iaac = model.indexPath(("a", "a", "c"))
+    assert state("a") == Qt.CheckState.Unchecked
+    assert state("a", "a") == Qt.CheckState.Unchecked
+    assert state("a", "b") == Qt.CheckState.Unchecked
 
     select(model, ia)
     deselect(model, iab)
     deselect(model, iaac)
     select(model, iab)
     select(model, iaac)
+    assert state("a") == Qt.CheckState.Checked
+    assert state("a", "a") == Qt.CheckState.Checked
+    assert state("a", "b") == Qt.CheckState.Checked
 
-    assert a.data.checkstate == Qt.CheckState(1)
-    assert aa.data.checkstate == Qt.CheckState(1)
-    assert ab.data.checkstate == Qt.CheckState(2)
-
-    assert a.data.checked_children == 2
-    assert ab.data.checked_children == 2
-    assert aa.data.checked_children == 5
-
-    # Test deselect all children with selected parent
-    iaa = model.indexPath(("a", "a"))
     deselect(model, iaa)
     deselect(model, iab)
+    assert state("a") == Qt.CheckState.PartiallyChecked
+    assert state("a", "a") == Qt.CheckState.Unchecked
+    assert state("a", "b") == Qt.CheckState.Unchecked
 
-    assert a.data.checkstate == Qt.CheckState(0)
-    assert a.data.checked_children == 0
-
-    # Test select child with deselected parent
     select(model, iaac)
-
-    assert a.data.checkstate == Qt.CheckState(1)
-    assert ab.data.checkstate == Qt.CheckState(0)
-    assert aa.data.checkstate == Qt.CheckState(1)
-    assert a.data.checked_children == 1
-    assert ab.data.checked_children == 0
-    assert aa.data.checked_children == 1
+    assert state("a") == Qt.CheckState.PartiallyChecked
+    assert state("a", "a") == Qt.CheckState.PartiallyChecked
+    assert state("a", "b") == Qt.CheckState.Unchecked
 
     select(model, iaa)
-    assert a.data.checkstate == Qt.CheckState(1)
+    assert state("a", "a") == Qt.CheckState.Checked
+    assert state("a") == Qt.CheckState.PartiallyChecked
 
     select(model, iab)
-    assert a.data.checkstate == Qt.CheckState(1)
+    assert state("a") == Qt.CheckState.Checked
 
 
 @pytest.mark.parametrize(
@@ -243,7 +250,7 @@ def test_include_pattern_escapes_metachars():
     assert not borg_fnmatch(pattern, "d/[a]xx\n")
 
 
-def test_extract_prepare_newline_filename(qapp):
+def test_extract_prepare_selected_directory(qapp):
     lines = [
         updated("a", {}),
         updated("a/x\nPRIMARY y", {"mode": "-rw-r--r--"}),
@@ -261,13 +268,39 @@ def test_extract_prepare_newline_filename(qapp):
     with open(ret['cleanup_files'][0].name) as f:
         content = f.read().splitlines()
 
-    assert content[0] == "P pf"
+    assert content == ["P pp", "+ a", "- fm:*"]
+
+
+def test_extract_prepare_partial_directory(qapp):
+    lines = [
+        updated("a", {}),
+        updated("a/x\nPRIMARY y", {"mode": "-rw-r--r--"}),
+        updated("a/trailing ", {"mode": "-rw-r--r--"}),
+        updated("a/plain", {"mode": "-rw-r--r--"}),
+        updated("a/b", {}),
+        updated("a/b/keep", {"mode": "-rw-r--r--"}),
+        updated("a/b/skip", {"mode": "-rw-r--r--"}),
+    ]
+    model = ExtractTree()
+    parse_json_lines(lines, model)
+    select(model, model.indexPath(("a",)))
+    deselect(model, model.indexPath(("a", "b", "skip")))
+
+    profile = BackupProfileModel.get()
+    ret = BorgExtractJob.prepare(profile, 'archive', model, '/tmp')
+    assert ret['ok']
+
+    with open(ret['cleanup_files'][0].name) as f:
+        content = f.read().splitlines()
+
+    assert content[0] == "P pp"
     assert content[-1] == "- fm:*"
-    assert all(line[:2] in ("P ", "+ ", "- ") for line in content)
-    assert "+ fm:a/x?PRIMARY y" in content
-    assert "+ fm:a/trailing?" in content
-    assert "+ a/plain" in content
-    assert "+ a" in content
+    assert set(content[1:-1]) == {
+        "+ fm:a/x?PRIMARY y",
+        "+ fm:a/trailing?",
+        "+ a/plain",
+        "+ a/b/keep",
+    }
 
 
 def test_parser_borg2_format():
