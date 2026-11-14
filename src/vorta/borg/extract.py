@@ -69,19 +69,20 @@ class BorgExtractJob(BorgJob):
         # Unselected (and excluded) parent folders will be restored by borg
         # but without the metadata stored in the archive.
         pattern_file = tempfile.NamedTemporaryFile('w', delete=True)
-        pattern_file.write("P pf\n")
+        pattern_file.write("P pp\n")
 
-        indexes = [QModelIndex()]
+        indexes = [model.index(i, 0, QModelIndex()) for i in range(model.rowCount(QModelIndex()))]
         while indexes:
             index = indexes.pop()
 
-            for i in range(model.rowCount(index)):
-                new_index = model.index(i, 0, index)
-                indexes.append(new_index)
-
-                item: FileSystemItem[FileData] = new_index.internalPointer()
-                if item.data.checkstate == Qt.CheckState.Checked:
-                    pattern_file.write(_include_pattern(path_to_str(item.path)) + "\n")
+            checked = model.data(index, Qt.ItemDataRole.CheckStateRole)
+            item: FileSystemItem[FileData] = index.internalPointer()
+            if checked == Qt.CheckState.Checked:
+                pattern_file.write(_include_pattern(path_to_str(item.path)) + "\n")
+            elif checked == Qt.CheckState.PartiallyChecked:
+                for i in range(model.rowCount(index)):
+                    indexes.append(model.index(i, 0, index))
+            # else do neither because its not relevant
 
         pattern_file.write("- fm:*\n")
         pattern_file.flush()
